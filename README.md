@@ -11,7 +11,7 @@ ChatGPT Desktop App 是 Electron 應用。以 `--remote-debugging-port` 參數�
 1. 檢查 `127.0.0.1:9341/json/version`；若 App 未在 CDP 模式，先 `kill` 再以 `open -na /Applications/ChatGPT.app --args --remote-debugging-address=127.0.0.1 --remote-debugging-port=9341` 重啟（單實例鎖會忽略第二次啟動的參數，必須先結束舊進程；登入狀態保留）。
 2. Attach 主視窗 target（`app://-/index.html`）。
 3. 點「新對話」→ 清空 composer → `execCommand('insertText')` 注入 prompt → 點「傳送」。
-4. 每 3 秒輪詢：無「停止」按鈕且出現新的生成圖片（`<img src="data:image/...">`，頁面內直接內嵌完整圖資）即完成。
+4. 每 3 秒輪詢：無「停止」按鈕且 App 的生成圖片容器（`[data-testid="generated-image-preview"]`／`generated-image-gallery`）中出現比發送前更多的圖片即完成（不看尺寸，小圖也抓得到）。
 5. 從 data URL 切出 base64 經 CDP 傳回，寫成 PNG。stdout 輸出 `路徑 bytes`。全程無網路下載、不需簽名 URL。
 
 CDP 只綁 127.0.0.1，不外露。
@@ -71,7 +71,7 @@ Claude Desktop 等其它 MCP 用戶端 similarly 以 `node chatgpt-image-mcp.mjs
 - **會留下一般對話紀錄**：App 右上角的「暫存對話」模式目前不支援圖片生成，所以生成結果會留在歷史中，需手動刪除。
 - 重啟 App 期間視覺上會閃一下；建議不在 App 裡手動操作時使用。
 - 生成耗時取決於官方配額與排隊狀態，預設逾時 5 分鐘。
-- 依賴 App 內的按鈕文字（新對話/傳送/停止）。OpenAI 改版或新增語言介面時需更新選擇器。
+- 依賴 App 內的按鈕文字（新對話/傳送/停止）與 `generated-image-*` testid。OpenAI 改版或新增語言介面時需更新選擇器。
 - 本質上是 UI 自動化：同一時間請只跑一個 bridge，避免兩個橋搶同一個 composer。
 
 ## License
