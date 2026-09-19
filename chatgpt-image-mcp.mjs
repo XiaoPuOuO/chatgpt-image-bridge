@@ -10,15 +10,15 @@ import { dirname, join } from 'node:path';
 const BRIDGE = join(dirname(fileURLToPath(import.meta.url)), 'chatgpt-image-bridge.mjs');
 
 const TOOLS = [{
-  name: 'generate_image',
-  description: '透過本機 ChatGPT Desktop App（CDP 自動化）生成圖片。傳送 prompt，工具會在新對話注入並發送、等待生成完畢，回傳存檔路徑與圖片內容。App 若未以 CDP 模式運行會自動重啟一次（登入狀態保留）。多個 Agent 同時呼叫時會自動跨行程排隊（FIFO），一次一張。',
+  name: 'image_generate',
+  description: '用使用者本人 ChatGPT Desktop App 的訂閱配額生成圖片（不用 API key、不另計費）。工具經本機 CDP 驅動已登入的 ChatGPT.app：開新對話、注入 prompt、發送、等生成完畢後存成 PNG，回傳檔案路徑與圖片本身。prompt 請用一句具體、自足的描述（中英文皆可），使用者指定風格時要寫進去。單張通常需 30-120 秒。App 若未以 CDP 模式運行會自動重啟一次（登入狀態保留）。多個 Agent 同時呼叫會經檔案鎖自動 FIFO 排隊、一次一張，併發時請相應調高 timeout／queue_timeout。',
   inputSchema: {
     type: 'object',
     properties: {
-      prompt: { type: 'string', description: '圖片描述（中文可用）' },
-      timeout: { type: 'number', description: '等待生成逾時秒數，預設 300' },
-      queue_timeout: { type: 'number', description: '等待前面排隊任務的逾時秒數，預設 900' },
-      out: { type: 'string', description: 'PNG 存檔路徑，預設 ~/.chatgpt-bridge/out/chatgpt-<timestamp>.png' }
+      prompt: { type: 'string', description: 'Image description sent to ChatGPT verbatim (Chinese or English). Describe subject, style, composition in one self-contained sentence.' },
+      timeout: { type: 'number', description: 'Seconds to wait for generation to finish, default 300' },
+      queue_timeout: { type: 'number', description: 'Seconds to wait for earlier queued image jobs, default 900' },
+      out: { type: 'string', description: 'PNG save path, default ~/.chatgpt-bridge/out/chatgpt-<timestamp>.png' }
     },
     required: ['prompt']
   }
@@ -56,7 +56,7 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
   if (method === 'ping') return reply(id, {});
   if (method === 'tools/call') {
     const a = params?.arguments ?? {};
-    if (params?.name !== 'generate_image') return fail(id, `unknown tool: ${params?.name}`);
+    if (params?.name !== 'image_generate') return fail(id, `unknown tool: ${params?.name}`);
     if (!a.prompt) return fail(id, 'prompt is required');
     const bridgeArgs = [a.prompt, '--timeout', String(a.timeout ?? 300), '--queue-timeout', String(a.queue_timeout ?? 900)];
     if (a.out) bridgeArgs.push('--out', a.out);
