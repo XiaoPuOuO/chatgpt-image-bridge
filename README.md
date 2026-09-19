@@ -60,7 +60,13 @@ node chatgpt-image-bridge.mjs "畫一張扁平插畫風的小圖：一隻戴耳�
 
 ### MCP server（給 AI Agent 呼叫）
 
-`chatgpt-image-mcp.mjs` 是零依賴的 stdio MCP server，暴露單一工具 `generate`；MCP 用戶端會以註冊名作前綴顯示，建議註冊名為 `image`，讓 Agent 端看到 `image_generate`。引數：`prompt` 必填、`timeout`、`queue_timeout`、`out`，回傳存檔路徑與 PNG 圖片內容。多個 Agent 同時呼叫時自動排隊，不會互相干擾。
+`chatgpt-image-mcp.mjs` 是零依賴的 stdio MCP server，暴露單一工具 `generate`；MCP 用戶端會以註冊名作前綴顯示，建議註冊名為 `image`，讓 Agent 端看到 `image_generate`。引數：`prompt` 必填、`timeout`、`queue_timeout`、`out`。回傳 JSON：
+
+```json
+{ "status": "success", "images": [ { "id": "img_...", "mime_type": "image/png", "width": 1254, "height": 1254, "path": "..." } ] }
+```
+
+失敗時為 `{ "status": "error", "message": "..." }`。多個 Agent 同時呼叫時自動排隊，不會互相干擾。
 
 OpenCode（`~/.config/opencode/opencode.jsonc`）：
 

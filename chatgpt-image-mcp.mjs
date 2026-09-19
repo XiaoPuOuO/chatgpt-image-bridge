@@ -2,6 +2,7 @@
 // chatgpt-image MCP server (stdio, newline-delimited JSON-RPC 2.0)
 // 包裝 ~/bin/chatgpt-image-bridge.mjs：本機 ChatGPT.app 生圖並回傳圖片。
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +12,7 @@ const BRIDGE = join(dirname(fileURLToPath(import.meta.url)), 'chatgpt-image-brid
 
 const TOOLS = [{
   name: 'generate',
-  description: '依文字描述生成一張圖片，回傳 PNG 與存檔路徑。prompt 寫成具體、自足的一句話（中英文皆可），使用者指定的風格要寫進去。',
+  description: '依文字描述生成一張圖片。回傳 JSON：{ status, images: [{ id, mime_type, width, height, path }] }。prompt 寫成具體、自足的一句話（中英文皆可），使用者指定的風格要寫進去。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -62,17 +63,13 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
     if (a.out) bridgeArgs.push('--out', a.out);
     try {
       const { out } = await runBridge(bridgeArgs);
-      const [path, bytes] = out.split(' ');
-      const b64 = readFileSync(path).toString('base64');
-      return reply(id, {
-        content: [
-          { type: 'text', text: `圖片已生成並儲存: ${path} (${bytes} bytes)` },
-          { type: 'image', data: b64, mimeType: 'image/png' }
-        ],
-        isError: false
-      });
+      const [path] = out.split(' ');
+      const buf = readFileSync(path);
+      const width = buf.readUInt32BE(16), height = buf.readUInt32BE(20);
+      const result = { status: 'success', images: [{ id: 'img_' + randomBytes(6).toString('hex'), mime_type: 'image/png', width, height, path }] };
+      return reply(id, { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], isError: false });
     } catch (e) {
-      return reply(id, { content: [{ type: 'text', text: `生成失敗: ${e.message}` }], isError: true });
+      return reply(id, { content: [{ type: 'text', text: JSON.stringify({ status: 'error', message: e.message }) }], isError: true });
     }
   }
   if (id !== null) reply(id, {});
