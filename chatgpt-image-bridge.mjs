@@ -82,7 +82,7 @@ const inj = await call(`(() => {
 console.error(`[bridge] 注入: ${inj}`);
 await wait(800);
 
-const baseline = await call(`[...document.querySelectorAll('img')].filter(i=>(/^data:image/.test(i.src)||/estuary|oaiusercontent/.test(i.src)) && i.naturalWidth>400).length`);
+const baseline = await call(`[...document.querySelectorAll('img')].filter(i=>/^data:image/.test(i.src) && i.naturalWidth>400).length`);
 
 const sent = await call(`(() => { const b=[...document.querySelectorAll('button')].find(x=>/^(傳送|發送|Send)$/i.test((x.getAttribute('aria-label')||x.innerText||'').trim())); if(!b) return 'no-send-btn'; if(b.disabled) return 'send-disabled'; b.click(); return 'clicked'; })()`);
 console.error(`[bridge] 發送: ${sent}`);
@@ -90,23 +90,12 @@ if (sent !== 'clicked') { console.error('[bridge] 發送失敗'); process.exit(1
 
 const done = await call(`(async () => {
   const t0 = Date.now(), LIMIT = ${TIMEOUT};
-  const match = (i) => (/^data:image/.test(i.src) || /estuary|oaiusercontent/.test(i.src)) && i.naturalWidth > 400;
+  const match = (i) => /^data:image/.test(i.src) && i.naturalWidth > 400;
   while (Date.now() - t0 < LIMIT) {
     const generating = [...document.querySelectorAll('button')].some(b=>/^(停止|Stop)$/i.test((b.getAttribute('aria-label')||b.innerText||'').trim()));
     const imgs = [...document.querySelectorAll('img')].filter(match);
     if (!generating && imgs.length > ${baseline}) {
-      const src = imgs[imgs.length-1].src;
-      let b64;
-      if (src.startsWith('data:')) {
-        b64 = src.split(',')[1];
-      } else {
-        const r = await fetch(src, { credentials: 'include' });
-        if (!r.ok) return JSON.stringify({error: 'fetch-'+r.status});
-        const u8 = new Uint8Array(await r.arrayBuffer());
-        let bin=''; const CH=0x8000;
-        for (let i=0;i<u8.length;i+=CH) bin += String.fromCharCode.apply(null, u8.subarray(i,i+CH));
-        b64 = btoa(bin);
-      }
+      const b64 = imgs[imgs.length-1].src.split(',')[1];
       return JSON.stringify({ok:true, bytes: Math.floor(b64.length*3/4), data:b64});
     }
     await new Promise(r=>setTimeout(r,3000));

@@ -11,8 +11,8 @@ ChatGPT Desktop App 是 Electron 應用。以 `--remote-debugging-port` 參數�
 1. 檢查 `127.0.0.1:9341/json/version`；若 App 未在 CDP 模式，先 `kill` 再以 `open -na /Applications/ChatGPT.app --args --remote-debugging-address=127.0.0.1 --remote-debugging-port=9341` 重啟（單實例鎖會忽略第二次啟動的參數，必須先結束舊進程；登入狀態保留）。
 2. Attach 主視窗 target（`app://-/index.html`）。
 3. 點「新對話」→ 清空 composer → `execCommand('insertText')` 注入 prompt → 點「傳送」。
-4. 每 3 秒輪詢：無「停止」按鈕且出現新的生成圖片（`data:` URL 或 estuary/oaiusercontent URL）即完成。
-5. 直接從 `data:` URL 取 base64（或頁內 `fetch` 帶 cookie 下載），寫成 PNG。stdout 輸出 `路徑 bytes`。
+4. 每 3 秒輪詢：無「停止」按鈕且出現新的生成圖片（`<img src="data:image/...">`，頁面內直接內嵌完整圖資）即完成。
+5. 從 data URL 切出 base64 經 CDP 傳回，寫成 PNG。stdout 輸出 `路徑 bytes`。全程無網路下載、不需簽名 URL。
 
 CDP 只綁 127.0.0.1，不外露。
 
