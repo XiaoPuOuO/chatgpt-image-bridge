@@ -1,0 +1,14 @@
+{
+  "name": "chatgpt-image-bridge",
+  "version": "1.0.0",
+  "description": "透過本機 ChatGPT Desktop App（Electron + loopback CDP）自動生成圖片的 CLI 工具與 MCP server",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "chatgpt-image-bridge": "./chatgpt-image-bridge.mjs",
+    "chatgpt-image-mcp": "./chatgpt-image-mcp.mjs"
+  },
+  "license": "MIT"
+}
