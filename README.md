@@ -44,12 +44,17 @@ node chatgpt-image-bridge.mjs "畫一張扁平插畫風的小圖：一隻戴耳�
 |---|---|---|
 | `--port` | `9341` | CDP port |
 | `--timeout` | `300` | 等待生成逾時（秒） |
+| `--queue-timeout` | `900` | 等待其他 bridge 任務完成的最長秒數，逾時退出碼 3 |
 | `--out` | `~/.chatgpt-bridge/out/chatgpt-<ts>.png` | 輸出路徑 |
 | `--no-restart` | off | App 不在 CDP 模式時直接報錯而不重啟 |
 
+### 多 Agent 併發
+
+多個 bridge 行程同時啟動時，會透過 `~/.chatgpt-bridge/lock` 檔案鎖**自動排隊（FIFO）**，同一時間只有一個操作 App，其餘等待前一個完成後依序執行。生圖在 OpenAI 端本就是串行，本地排隊不損失吞吐。持有鎖的行程崩潰時，鎖會因 pid 失效或超過 15 分鐘而被自動搶佔。N 個併發請求的總耗時約為單張時間 × N，請相應調高 MCP 用戶端的 `timeout`。
+
 ### MCP server（給 AI Agent 呼叫）
 
-`chatgpt-image-mcp.mjs` 是零依賴的 stdio MCP server，暴露單一工具 `generate_image`（引數：`prompt` 必填、`timeout`、`out`），回傳存檔路徑與 PNG 圖片內容。
+`chatgpt-image-mcp.mjs` 是零依賴的 stdio MCP server，暴露單一工具 `generate_image`（引數：`prompt` 必填、`timeout`、`queue_timeout`、`out`），回傳存檔路徑與 PNG 圖片內容。多個 Agent 同時呼叫時自動排隊，不會互相干擾。
 
 OpenCode（`~/.config/opencode/opencode.jsonc`）：
 
@@ -59,7 +64,7 @@ OpenCode（`~/.config/opencode/opencode.jsonc`）：
     "type": "local",
     "command": ["node", "/路徑/chatgpt-image-bridge/chatgpt-image-mcp.mjs"],
     "enabled": true,
-    "timeout": 600000
+    "timeout": 1800000
   }
 }
 ```
@@ -72,7 +77,7 @@ Claude Desktop 等其它 MCP 用戶端 similarly 以 `node chatgpt-image-mcp.mjs
 - 重啟 App 期間視覺上會閃一下；建議不在 App 裡手動操作時使用。
 - 生成耗時取決於官方配額與排隊狀態，預設逾時 5 分鐘。
 - 依賴 App 內的按鈕文字（新對話/傳送/停止）與 `generated-image-*` testid。OpenAI 改版或新增語言介面時需更新選擇器。
-- 本質上是 UI 自動化：同一時間請只跑一個 bridge，避免兩個橋搶同一個 composer。
+- 本質上是 UI 自動化：同一時間只有一個橋能操作 App，多橋併發時由檔案鎖自動排队（見「多 Agent 併發」）。
 
 ## License
 

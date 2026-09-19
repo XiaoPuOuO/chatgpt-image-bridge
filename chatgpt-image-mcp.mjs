@@ -11,12 +11,13 @@ const BRIDGE = join(dirname(fileURLToPath(import.meta.url)), 'chatgpt-image-brid
 
 const TOOLS = [{
   name: 'generate_image',
-  description: '透過本機 ChatGPT Desktop App（CDP 自動化）生成圖片。傳送 prompt，工具會在新對話注入並發送、等待生成完畢，回傳存檔路徑與圖片內容。App 若未以 CDP 模式運行會自動重啟一次（登入狀態保留）。',
+  description: '透過本機 ChatGPT Desktop App（CDP 自動化）生成圖片。傳送 prompt，工具會在新對話注入並發送、等待生成完畢，回傳存檔路徑與圖片內容。App 若未以 CDP 模式運行會自動重啟一次（登入狀態保留）。多個 Agent 同時呼叫時會自動跨行程排隊（FIFO），一次一張。',
   inputSchema: {
     type: 'object',
     properties: {
       prompt: { type: 'string', description: '圖片描述（中文可用）' },
       timeout: { type: 'number', description: '等待生成逾時秒數，預設 300' },
+      queue_timeout: { type: 'number', description: '等待前面排隊任務的逾時秒數，預設 900' },
       out: { type: 'string', description: 'PNG 存檔路徑，預設 ~/.chatgpt-bridge/out/chatgpt-<timestamp>.png' }
     },
     required: ['prompt']
@@ -57,7 +58,7 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
     const a = params?.arguments ?? {};
     if (params?.name !== 'generate_image') return fail(id, `unknown tool: ${params?.name}`);
     if (!a.prompt) return fail(id, 'prompt is required');
-    const bridgeArgs = [a.prompt, '--timeout', String(a.timeout ?? 300)];
+    const bridgeArgs = [a.prompt, '--timeout', String(a.timeout ?? 300), '--queue-timeout', String(a.queue_timeout ?? 900)];
     if (a.out) bridgeArgs.push('--out', a.out);
     try {
       const { out } = await runBridge(bridgeArgs);

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // chatgpt-image-bridge: 透過本機 ChatGPT.app 的 loopback CDP 注入 prompt、等待生成、取回 PNG。
-// 用法: chatgpt-image-bridge.mjs "prompt" [--port 9341] [--timeout 300] [--out FILE] [--no-restart]
-import { mkdirSync, writeFileSync } from 'node:fs';
+// 用法: chatgpt-image-bridge.mjs "prompt" [--port 9341] [--timeout 300] [--queue-timeout 900] [--out FILE] [--no-restart]
+// 併發安全：跨行程檔案鎖排队，同一時間只有一個 bridge 操作 App。
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -11,8 +12,10 @@ const prompt = args.find(a => !a.startsWith('--'));
 const flag = (n, d) => { const i = args.indexOf(`--${n}`); return i >= 0 && args[i+1] && !args[i+1].startsWith('--') ? args[i+1] : (args.includes(`--${n}`) ? true : d); };
 const PORT = Number(flag('port', '9341'));
 const TIMEOUT = Number(flag('timeout', '300')) * 1000;
+const QUEUE_TIMEOUT = Number(flag('queue-timeout', '900')) * 1000;
 const OUT = flag('out', join(homedir(), '.chatgpt-bridge', 'out', `chatgpt-${Date.now()}.png`));
 const APP = '/Applications/ChatGPT.app';
+const LOCK_DIR = join(homedir(), '.chatgpt-bridge', 'lock');
 
 if (!prompt) { console.error('用法: chatgpt-image-bridge.mjs "prompt"'); process.exit(2); }
 
@@ -46,6 +49,35 @@ async function attach() {
   console.error('[bridge] 找不到 app://-/index.html renderer'); process.exit(1);
 }
 
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+async function acquireLock() {
+  mkdirSync(join(LOCK_DIR, '..'), { recursive: true });
+  const t0 = Date.now();
+  let logged = false;
+  for (;;) {
+    try {
+      mkdirSync(LOCK_DIR);
+      writeFileSync(join(LOCK_DIR, 'owner'), JSON.stringify({ pid: process.pid, at: Date.now(), prompt: prompt.slice(0, 60) }));
+      return;
+    } catch {
+      let stale = false;
+      try {
+        const o = JSON.parse(readFileSync(join(LOCK_DIR, 'owner'), 'utf8'));
+        let alive = true; try { process.kill(o.pid, 0); } catch { alive = false; }
+        if (!alive || Date.now() - o.at > 15 * 60 * 1000) stale = true;
+      } catch { stale = true; }
+      if (stale) { rmSync(LOCK_DIR, { recursive: true, force: true }); continue; }
+      if (Date.now() - t0 > QUEUE_TIMEOUT) { console.error(`[bridge] 排隊等待超過 ${QUEUE_TIMEOUT / 1000}s，放棄`); process.exit(3); }
+      if (!logged) { console.error('[bridge] 其他生圖任務執行中，排隊等待...'); logged = true; }
+      await sleep(3000);
+    }
+  }
+}
+const releaseLock = () => rmSync(LOCK_DIR, { recursive: true, force: true });
+process.on('exit', releaseLock);
+
+await acquireLock();
 await ensureCdp();
 const ws = new WebSocket(await attach());
 await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
