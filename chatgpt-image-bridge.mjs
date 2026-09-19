@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // chatgpt-image-bridge: 透過本機 ChatGPT.app 的 loopback CDP 注入 prompt、等待生成、取回 PNG。
-// 用法: chatgpt-image-bridge.mjs "prompt" [--port 9341] [--timeout 300] [--queue-timeout 900] [--out FILE] [--no-restart]
+// 用法: chatgpt-image-bridge.mjs "prompt" [--port 9342] [--timeout 300] [--queue-timeout 900] [--out FILE] [--no-restart]
 // 併發安全：跨行程檔案鎖排队，同一時間只有一個 bridge 操作 App。
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 const args = process.argv.slice(2);
 const prompt = args.find(a => !a.startsWith('--'));
 const flag = (n, d) => { const i = args.indexOf(`--${n}`); return i >= 0 && args[i+1] && !args[i+1].startsWith('--') ? args[i+1] : (args.includes(`--${n}`) ? true : d); };
-const PORT = Number(flag('port', '9341'));
+const PORT = Number(flag('port', '9342'));
 const TIMEOUT = Number(flag('timeout', '300')) * 1000;
 const QUEUE_TIMEOUT = Number(flag('queue-timeout', '900')) * 1000;
 const OUT = flag('out', join(homedir(), '.chatgpt-bridge', 'out', `chatgpt-${Date.now()}.png`));

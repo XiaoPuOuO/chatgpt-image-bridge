@@ -4,11 +4,17 @@
 
 不是逆向 API、不用額外訂閱：工具用 Chrome DevTools Protocol（CDP）驅動你自己已登入的 ChatGPT.app——在「新對話」輸入框注入 prompt、按「傳送」、輪詢到生成完畢、把圖片取回落盤。用的就是你 App 本身的帳號與配額。
 
+## 存在的意義
+
+你訂閱 ChatGPT 就已經有聊天生圖額度，但它只能靠人在聊天窗口裡手動使用。這個工具把那份額度**變成一個可被程式呼叫的介面**：任何支援 MCP 的 Agent 環境（OpenCode、Claude Desktop 等）裝上它，Agent 就能直接「叫圖生圖」，產出 PNG 回傳繼續工作流——不用額外申請 OpenAI API key、不用按 API 計費付費、不動到帳號安全性（它只是自動化你本人的 UI 操作，官方看到的就是一個使用者在聊天）。
+
+一句話：**把 ChatGPT 聊天的生圖額度搬進你自己的 Agent 工具鏈。**
+
 ## 原理
 
 ChatGPT Desktop App 是 Electron 應用。以 `--remote-debugging-port` 參數啟動後，可用 loopback CDP 對其 renderer 執行 `Runtime.evaluate`：
 
-1. 檢查 `127.0.0.1:9341/json/version`；若 App 未在 CDP 模式，先 `kill` 再以 `open -na /Applications/ChatGPT.app --args --remote-debugging-address=127.0.0.1 --remote-debugging-port=9341` 重啟（單實例鎖會忽略第二次啟動的參數，必須先結束舊進程；登入狀態保留）。
+1. 檢查 `127.0.0.1:9342/json/version`；若 App 未在 CDP 模式，先 `kill` 再以 `open -na /Applications/ChatGPT.app --args --remote-debugging-address=127.0.0.1 --remote-debugging-port=9342` 重啟（單實例鎖會忽略第二次啟動的參數，必須先結束舊進程；登入狀態保留）。選 9342 是為了避開 Codex Dream Skin injector 預設 watch 的 9341。
 2. Attach 主視窗 target（`app://-/index.html`）。
 3. 點「新對話」→ 清空 composer → `execCommand('insertText')` 注入 prompt → 點「傳送」。
 4. 每 3 秒輪詢：無「停止」按鈕且 App 的生成圖片容器（`[data-testid="generated-image-preview"]`／`generated-image-gallery`）中出現比發送前更多的圖片即完成（不看尺寸，小圖也抓得到）。
@@ -42,7 +48,7 @@ node chatgpt-image-bridge.mjs "畫一張扁平插畫風的小圖：一隻戴耳�
 
 | 選項 | 預設 | 說明 |
 |---|---|---|
-| `--port` | `9341` | CDP port |
+| `--port` | `9342` | CDP port |
 | `--timeout` | `300` | 等待生成逾時（秒） |
 | `--queue-timeout` | `900` | 等待其他 bridge 任務完成的最長秒數，逾時退出碼 3 |
 | `--out` | `~/.chatgpt-bridge/out/chatgpt-<ts>.png` | 輸出路徑 |
