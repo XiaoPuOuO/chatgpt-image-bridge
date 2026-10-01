@@ -133,13 +133,28 @@ const call = async (expression, timeoutMs = 30000) => {
 
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
 
-const ready = await call(`(() => { const b=[...document.querySelectorAll('button')].find(x=>/^新對話|New chat$/i.test((x.getAttribute('aria-label')||x.innerText||'').trim())); if(!b) return 'no-newchat-btn'; b.click(); return 'clicked'; })()`);
-console.error(`[bridge] 新對話: ${ready}`);
-if (ready !== 'clicked') {
-  console.error('[bridge] 找不到「新對話」按鈕。若這是第一次使用，請在剛開啟的專用 Chrome 視窗登入 ChatGPT 後重試。');
+const ready = await call(`(async () => {
+  const t0 = Date.now(), LIMIT = 60000;
+  while (Date.now() - t0 < LIMIT) {
+    const b = [...document.querySelectorAll('button')]
+      .find(x=>/^新對話|New chat$/i.test((x.getAttribute('aria-label')||x.innerText||'').trim()));
+    if (b) { b.click(); return 'clicked'; }
+    const composer = [...document.querySelectorAll('form[data-chatgpt-composer]')]
+      .find(f => !!(f.offsetWidth || f.offsetHeight || f.getClientRects().length));
+    if (composer && document.readyState === 'complete') return 'composer-ready';
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  return 'timeout';
+})()`, 65000);
+console.error(`[bridge] 頁面就緒: ${ready}`);
+if (ready === 'timeout') {
+  console.error('[bridge] ChatGPT 頁面 60 秒內仍未就緒。若這是第一次使用，請確認專用 Chrome 視窗已登入 ChatGPT；否則可能只是網頁載入失敗，可重試。');
   process.exit(1);
 }
-await wait(2500);
+if (ready === 'composer-ready') {
+  console.error('[bridge] 已在可用的新對話頁面');
+}
+await wait(1000);
 
 const focused = await call(`(() => {
   const form = [...document.querySelectorAll('form[data-chatgpt-composer]')]
