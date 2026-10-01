@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// chatgpt-image-bridge: 透過本機 ChatGPT.app 的 loopback CDP 注入 prompt、等待生成、取回 PNG。
-// 用法: chatgpt-image-bridge.mjs "prompt" [--port 9342] [--timeout 300] [--queue-timeout 900] [--out FILE] [--no-restart]
-// 併發安全：跨行程檔案鎖排队，同一時間只有一個 bridge 操作 App。
+// chatgpt-image-bridge: 透過獨立 Chrome profile 的 loopback CDP 操作 ChatGPT Web、等待生成、取回 PNG。
+// 用法: chatgpt-image-bridge.mjs "prompt" [--port 9342] [--timeout 300] [--queue-timeout 900] [--out FILE]
+// 併發安全：跨行程檔案鎖排隊，同一時間只有一個 bridge 操作專用 ChatGPT Web 頁面。
 import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -14,25 +14,55 @@ const PORT = Number(flag('port', '9342'));
 const TIMEOUT = Number(flag('timeout', '300')) * 1000;
 const QUEUE_TIMEOUT = Number(flag('queue-timeout', '900')) * 1000;
 const OUT = flag('out', join(homedir(), '.chatgpt-bridge', 'out', `chatgpt-${Date.now()}.png`));
-const APP = '/Applications/ChatGPT.app';
+const CHROME = '/Applications/Google Chrome.app';
+const CHROME_PROFILE = join(homedir(), '.chatgpt-bridge', 'chrome-profile');
 const LOCK_DIR = join(homedir(), '.chatgpt-bridge', 'lock');
 
 if (!prompt) { console.error('用法: chatgpt-image-bridge.mjs "prompt"'); process.exit(2); }
 
 const cdpUp = async () => { try { const r = await fetch(`http://127.0.0.1:${PORT}/json/version`, { signal: AbortSignal.timeout(2000) }); return r.ok; } catch { return false; } };
+const chatgptTarget = async () => {
+  try {
+    const list = await (await fetch(`http://127.0.0.1:${PORT}/json`, { signal: AbortSignal.timeout(2000) })).json();
+    return list.find(x => /^https:\/\/chatgpt\.com(?:\/|$)/.test(x.url) && x.webSocketDebuggerUrl);
+  } catch {
+    return undefined;
+  }
+};
+const openChatgptTarget = async () => {
+  try {
+    const r = await fetch(`http://127.0.0.1:${PORT}/json/new?https://chatgpt.com/`, {
+      method: 'PUT',
+      signal: AbortSignal.timeout(5000)
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+};
 
 async function ensureCdp() {
-  if (await cdpUp()) return;
-  if (flag('no-restart')) { console.error(`CDP port ${PORT} 未開啟`); process.exit(1); }
-  console.error('[bridge] 以 CDP 參數重啟 ChatGPT.app ...');
-  const cur = spawnSync('pgrep', ['-f', `${APP}/Contents/MacOS/ChatGPT`]).stdout.toString().trim().split('\n').filter(Boolean);
-  for (const pid of cur) spawnSync('kill', [pid]);
-  const t0 = Date.now();
-  while (Date.now() - t0 < 20000) {
-    if (spawnSync('pgrep', ['-f', `${APP}/Contents/MacOS/ChatGPT`]).status !== 0) break;
-    await new Promise(r => setTimeout(r, 500));
+  if (await cdpUp()) {
+    if (await chatgptTarget()) return;
+    console.error('[bridge] CDP 已啟動但沒有 ChatGPT 頁面，建立新分頁 ...');
+    if (await openChatgptTarget()) return;
+    console.error('[bridge] 無法建立 ChatGPT 頁面');
+    process.exit(1);
   }
-  spawnSync('/usr/bin/open', ['-na', APP, '--args', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=' + PORT]);
+  console.error('[bridge] 啟動獨立 ChatGPT Chrome profile ...');
+  mkdirSync(CHROME_PROFILE, { recursive: true });
+  spawnSync('/usr/bin/open', [
+    '-na',
+    CHROME,
+    '--args',
+    '--remote-debugging-address=127.0.0.1',
+    '--remote-debugging-port=' + PORT,
+    '--user-data-dir=' + CHROME_PROFILE,
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--new-window',
+    'https://chatgpt.com/'
+  ]);
   const t1 = Date.now();
   while (Date.now() - t1 < 60000) { if (await cdpUp()) return; await new Promise(r => setTimeout(r, 1000)); }
   console.error('[bridge] CDP 啟動逾時'); process.exit(1);
@@ -41,12 +71,11 @@ async function ensureCdp() {
 async function attach() {
   const t0 = Date.now();
   while (Date.now() - t0 < 60000) {
-    const list = await (await fetch(`http://127.0.0.1:${PORT}/json`)).json().catch(() => []);
-    const t = list.find(x => x.url === 'app://-/index.html' && x.webSocketDebuggerUrl);
+    const t = await chatgptTarget();
     if (t) return t.webSocketDebuggerUrl;
     await new Promise(r => setTimeout(r, 1000));
   }
-  console.error('[bridge] 找不到 app://-/index.html renderer'); process.exit(1);
+  console.error('[bridge] 找不到 chatgpt.com 頁面'); process.exit(1);
 }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -82,52 +111,90 @@ await ensureCdp();
 const ws = new WebSocket(await attach());
 await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
 let seq = 1;
-const call = (expression, timeoutMs = 30000) => new Promise((res, rej) => {
+const cdp = (method, params = {}, timeoutMs = 30000) => new Promise((res, rej) => {
   const id = seq++;
   const timer = setTimeout(() => { ws.removeEventListener('message', h); rej(new Error('evaluate timeout')); }, timeoutMs);
   const h = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.id === id) { clearTimeout(timer); ws.removeEventListener('message', h);
-      m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result?.result?.value); }
+      m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result); }
   };
   ws.addEventListener('message', h);
-  ws.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, returnByValue: true, awaitPromise: true } }));
+  ws.send(JSON.stringify({ id, method, params }));
 });
+const call = async (expression, timeoutMs = 30000) => {
+  const r = await cdp('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, timeoutMs);
+  if (r?.exceptionDetails) {
+    const detail = r.exceptionDetails.exception?.description || r.exceptionDetails.text || 'Runtime.evaluate failed';
+    throw new Error(detail);
+  }
+  return r?.result?.value;
+};
 
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
 
 const ready = await call(`(() => { const b=[...document.querySelectorAll('button')].find(x=>/^新對話|New chat$/i.test((x.getAttribute('aria-label')||x.innerText||'').trim())); if(!b) return 'no-newchat-btn'; b.click(); return 'clicked'; })()`);
 console.error(`[bridge] 新對話: ${ready}`);
+if (ready !== 'clicked') {
+  console.error('[bridge] 找不到「新對話」按鈕。若這是第一次使用，請在剛開啟的專用 Chrome 視窗登入 ChatGPT 後重試。');
+  process.exit(1);
+}
 await wait(2500);
 
-const inj = await call(`(() => {
-  const el = document.querySelector('[contenteditable=true]'); if(!el) return 'no-composer';
+const focused = await call(`(() => {
+  const form = [...document.querySelectorAll('form[data-chatgpt-composer]')]
+    .find(f => !!(f.offsetWidth || f.offsetHeight || f.getClientRects().length));
+  const el = form?.querySelector('[contenteditable=true]');
+  if (!el) return 'no-composer';
   el.scrollIntoView(); el.focus();
-  document.execCommand('selectAll', false, null);
-  document.execCommand('delete', false, null);
-  const sel = window.getSelection(); const range = document.createRange();
-  range.selectNodeContents(el); range.collapse(false);
-  sel.removeAllRanges(); sel.addRange(range);
-  document.execCommand('insertText', false, ${JSON.stringify(prompt)});
-  return JSON.stringify({text: el.innerText.slice(0,80)});
+  return 'focused';
+})()`);
+if (focused !== 'focused') { console.error('[bridge] 找不到可見的 composer'); process.exit(1); }
+await cdp('Input.insertText', { text: prompt });
+const inj = await call(`(() => {
+  const form = [...document.querySelectorAll('form[data-chatgpt-composer]')]
+    .find(f => !!(f.offsetWidth || f.offsetHeight || f.getClientRects().length));
+  const el = form?.querySelector('[contenteditable=true]');
+  return JSON.stringify({text: (el?.innerText || '').slice(0,80)});
 })()`);
 console.error(`[bridge] 注入: ${inj}`);
 await wait(800);
 
 const baseline = await call(`document.querySelectorAll('[data-testid="generated-image-preview"] img, [data-testid="generated-image-gallery"] img').length`);
 
-const sent = await call(`(() => { const b=[...document.querySelectorAll('button')].find(x=>/^(傳送|發送|Send)$/i.test((x.getAttribute('aria-label')||x.innerText||'').trim())); if(!b) return 'no-send-btn'; if(b.disabled) return 'send-disabled'; b.click(); return 'clicked'; })()`);
+const sent = await call(`(() => {
+  const form = [...document.querySelectorAll('form[data-chatgpt-composer]')]
+    .find(f => !!(f.offsetWidth || f.offsetHeight || f.getClientRects().length));
+  const b = [...(form?.querySelectorAll('button') || [])]
+    .find(x=>/^(傳送|發送|Send)$/i.test((x.getAttribute('aria-label')||x.innerText||'').trim()));
+  if(!b) return 'no-send-btn'; if(b.disabled) return 'send-disabled'; b.click(); return 'clicked';
+})()`);
 console.error(`[bridge] 發送: ${sent}`);
 if (sent !== 'clicked') { console.error('[bridge] 發送失敗'); process.exit(1); }
 
 const done = await call(`(async () => {
   const t0 = Date.now(), LIMIT = ${TIMEOUT};
-  const match = () => [...document.querySelectorAll('[data-testid="generated-image-preview"] img, [data-testid="generated-image-gallery"] img')].filter(i => /^data:image/.test(i.src));
+  const match = () => [...document.querySelectorAll('[data-testid="generated-image-preview"] img, [data-testid="generated-image-gallery"] img')]
+    .filter(i => i.src.startsWith('data:image/') || i.src.startsWith('blob:https://chatgpt.com/'));
+  const toDataUrl = async (img) => {
+    if (img.src.startsWith('data:image/')) return img.src;
+    const blob = await fetch(img.src).then(r => {
+      if (!r.ok) throw new Error('image blob fetch failed: ' + r.status);
+      return r.blob();
+    });
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error('image blob read failed'));
+      reader.readAsDataURL(blob);
+    });
+  };
   while (Date.now() - t0 < LIMIT) {
     const generating = [...document.querySelectorAll('button')].some(b=>/^(停止|Stop)$/i.test((b.getAttribute('aria-label')||b.innerText||'').trim()));
     const imgs = match();
     if (!generating && imgs.length > ${baseline}) {
-      const b64 = imgs[imgs.length-1].src.split(',')[1];
+      const dataUrl = await toDataUrl(imgs[imgs.length-1]);
+      const b64 = dataUrl.split(',')[1];
       return JSON.stringify({ok:true, bytes: Math.floor(b64.length*3/4), data:b64});
     }
     await new Promise(r=>setTimeout(r,3000));
