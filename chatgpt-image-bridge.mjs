@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // chatgpt-image-bridge: 透過獨立 Chrome profile 的 loopback CDP 操作 ChatGPT Web、等待生成、取回 PNG。
 // 用法: chatgpt-image-bridge.mjs "prompt" [--port 9342] [--timeout 300] [--queue-timeout 900] [--out FILE]
-// 併發安全：跨行程檔案鎖排隊，同一時間只有一個 bridge 操作專用 ChatGPT Web 頁面。
-import { mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+// 併發安全：每個 bridge 租用一個獨立 ChatGPT 頁面；第一個頁面常駐，額外併發頁面完成後關閉。
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -13,25 +13,38 @@ const flag = (n, d) => { const i = args.indexOf(`--${n}`); return i >= 0 && args
 const PORT = Number(flag('port', '9342'));
 const TIMEOUT = Number(flag('timeout', '300')) * 1000;
 const QUEUE_TIMEOUT = Number(flag('queue-timeout', '900')) * 1000;
-const OUT = flag('out', join(homedir(), '.chatgpt-bridge', 'out', `chatgpt-${Date.now()}.png`));
+const OUT = flag('out', join(homedir(), '.chatgpt-bridge', 'out', `chatgpt-${Date.now()}-${process.pid}.png`));
 const CHROME = '/Applications/Google Chrome.app';
 const CHROME_PROFILE = join(homedir(), '.chatgpt-bridge', 'chrome-profile');
-const LOCK_DIR = join(homedir(), '.chatgpt-bridge', 'lock');
+const STATE_DIR = join(homedir(), '.chatgpt-bridge');
+const ALLOC_LOCK_DIR = join(STATE_DIR, 'page-allocator-lock');
+const LEASE_DIR = join(STATE_DIR, 'page-leases');
 
 if (!prompt) { console.error('用法: chatgpt-image-bridge.mjs "prompt"'); process.exit(2); }
 
 const cdpUp = async () => { try { const r = await fetch(`http://127.0.0.1:${PORT}/json/version`, { signal: AbortSignal.timeout(2000) }); return r.ok; } catch { return false; } };
-const chatgptTarget = async () => {
+const chatgptTargets = async () => {
   try {
     const list = await (await fetch(`http://127.0.0.1:${PORT}/json`, { signal: AbortSignal.timeout(2000) })).json();
-    return list.find(x => /^https:\/\/chatgpt\.com(?:\/|$)/.test(x.url) && x.webSocketDebuggerUrl);
+    return list.filter(x => x.type === 'page' && /^https:\/\/chatgpt\.com(?:\/|$)/.test(x.url) && x.webSocketDebuggerUrl);
   } catch {
-    return undefined;
+    return [];
   }
 };
 const openChatgptTarget = async () => {
   try {
     const r = await fetch(`http://127.0.0.1:${PORT}/json/new?https://chatgpt.com/`, {
+      method: 'PUT',
+      signal: AbortSignal.timeout(5000)
+    });
+    return r.ok ? await r.json() : undefined;
+  } catch {
+    return undefined;
+  }
+};
+const closeTarget = async (id) => {
+  try {
+    const r = await fetch(`http://127.0.0.1:${PORT}/json/close/${encodeURIComponent(id)}`, {
       method: 'PUT',
       signal: AbortSignal.timeout(5000)
     });
@@ -43,7 +56,7 @@ const openChatgptTarget = async () => {
 
 async function ensureCdp() {
   if (await cdpUp()) {
-    if (await chatgptTarget()) return;
+    if ((await chatgptTargets()).length) return;
     console.error('[bridge] CDP 已啟動但沒有 ChatGPT 頁面，建立新分頁 ...');
     if (await openChatgptTarget()) return;
     console.error('[bridge] 無法建立 ChatGPT 頁面');
@@ -68,48 +81,98 @@ async function ensureCdp() {
   console.error('[bridge] CDP 啟動逾時'); process.exit(1);
 }
 
-async function attach() {
-  const t0 = Date.now();
-  while (Date.now() - t0 < 60000) {
-    const t = await chatgptTarget();
-    if (t) return t.webSocketDebuggerUrl;
-    await new Promise(r => setTimeout(r, 1000));
-  }
-  console.error('[bridge] 找不到 chatgpt.com 頁面'); process.exit(1);
-}
-
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function acquireLock() {
-  mkdirSync(join(LOCK_DIR, '..'), { recursive: true });
+async function acquireAllocatorLock() {
+  mkdirSync(STATE_DIR, { recursive: true });
   const t0 = Date.now();
-  let logged = false;
   for (;;) {
     try {
-      mkdirSync(LOCK_DIR);
-      writeFileSync(join(LOCK_DIR, 'owner'), JSON.stringify({ pid: process.pid, at: Date.now(), prompt: prompt.slice(0, 60) }));
+      mkdirSync(ALLOC_LOCK_DIR);
+      writeFileSync(join(ALLOC_LOCK_DIR, 'owner'), JSON.stringify({ pid: process.pid, at: Date.now() }));
       return;
     } catch {
       let stale = false;
       try {
-        const o = JSON.parse(readFileSync(join(LOCK_DIR, 'owner'), 'utf8'));
+        const o = JSON.parse(readFileSync(join(ALLOC_LOCK_DIR, 'owner'), 'utf8'));
         let alive = true; try { process.kill(o.pid, 0); } catch { alive = false; }
-        if (!alive || Date.now() - o.at > 15 * 60 * 1000) stale = true;
+        if (!alive || Date.now() - o.at > 90 * 1000) stale = true;
       } catch { stale = true; }
-      if (stale) { rmSync(LOCK_DIR, { recursive: true, force: true }); continue; }
-      if (Date.now() - t0 > QUEUE_TIMEOUT) { console.error(`[bridge] 排隊等待超過 ${QUEUE_TIMEOUT / 1000}s，放棄`); process.exit(3); }
-      if (!logged) { console.error('[bridge] 其他生圖任務執行中，排隊等待...'); logged = true; }
-      await sleep(3000);
+      if (stale) { rmSync(ALLOC_LOCK_DIR, { recursive: true, force: true }); continue; }
+      if (Date.now() - t0 > Math.min(QUEUE_TIMEOUT, 120000)) throw new Error('page allocator lock timeout');
+      await sleep(100);
     }
   }
 }
-const releaseLock = () => rmSync(LOCK_DIR, { recursive: true, force: true });
-process.on('exit', releaseLock);
+const releaseAllocatorLock = () => rmSync(ALLOC_LOCK_DIR, { recursive: true, force: true });
+const leasePath = (targetId) => join(LEASE_DIR, targetId);
+const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-await acquireLock();
-await ensureCdp();
-const ws = new WebSocket(await attach());
+async function reserveTarget() {
+  await acquireAllocatorLock();
+  try {
+    await ensureCdp();
+    mkdirSync(LEASE_DIR, { recursive: true });
+
+    const targets = await chatgptTargets();
+    const targetIds = new Set(targets.map(t => t.id));
+    for (const file of readdirSync(LEASE_DIR)) {
+      try {
+        const path = join(LEASE_DIR, file);
+        const lease = JSON.parse(readFileSync(path, 'utf8'));
+        if (!targetIds.has(file) || !pidAlive(lease.pid)) {
+          rmSync(path, { force: true });
+          if (lease.temporary && targetIds.has(file)) await closeTarget(file);
+        }
+      } catch {
+        rmSync(join(LEASE_DIR, file), { force: true });
+      }
+    }
+
+    const refreshed = await chatgptTargets();
+    const leased = new Set(readdirSync(LEASE_DIR));
+    const free = refreshed.find(t => !leased.has(t.id));
+    let target = free;
+    let temporary = false;
+
+    if (!target) {
+      target = await openChatgptTarget();
+      if (!target?.id || !target.webSocketDebuggerUrl) throw new Error('無法建立額外 ChatGPT 頁面');
+      temporary = true;
+      console.error(`[bridge] 併發中，建立臨時頁面 ${target.id}`);
+    } else {
+      console.error(`[bridge] 租用現有頁面 ${target.id}`);
+    }
+
+    writeFileSync(leasePath(target.id), JSON.stringify({
+      pid: process.pid,
+      at: Date.now(),
+      temporary,
+      prompt: prompt.slice(0, 60)
+    }));
+    return { target, temporary };
+  } finally {
+    releaseAllocatorLock();
+  }
+}
+
+async function releaseTarget(targetId, temporary) {
+  rmSync(leasePath(targetId), { force: true });
+  if (temporary) {
+    const closed = await closeTarget(targetId);
+    console.error(`[bridge] 臨時頁面 ${targetId} ${closed ? '已關閉' : '關閉失敗'}`);
+  }
+}
+
+const reservation = await reserveTarget();
+const ws = new WebSocket(reservation.target.webSocketDebuggerUrl);
 await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+const failAfterReservation = async (message, code = 1) => {
+  if (message) console.error(message);
+  try { ws.close(); } catch {}
+  await releaseTarget(reservation.target.id, reservation.temporary);
+  process.exit(code);
+};
 let seq = 1;
 const cdp = (method, params = {}, timeoutMs = 30000) => new Promise((res, rej) => {
   const id = seq++;
@@ -123,12 +186,22 @@ const cdp = (method, params = {}, timeoutMs = 30000) => new Promise((res, rej) =
   ws.send(JSON.stringify({ id, method, params }));
 });
 const call = async (expression, timeoutMs = 30000) => {
-  const r = await cdp('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, timeoutMs);
-  if (r?.exceptionDetails) {
-    const detail = r.exceptionDetails.exception?.description || r.exceptionDetails.text || 'Runtime.evaluate failed';
-    throw new Error(detail);
+  const startedAt = Date.now();
+  for (;;) {
+    try {
+      const remaining = Math.max(1000, timeoutMs - (Date.now() - startedAt));
+      const r = await cdp('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, remaining);
+      if (r?.exceptionDetails) {
+        const detail = r.exceptionDetails.exception?.description || r.exceptionDetails.text || 'Runtime.evaluate failed';
+        throw new Error(detail);
+      }
+      return r?.result?.value;
+    } catch (error) {
+      if (!String(error?.message || error).includes('Cannot find default execution context')) throw error;
+      if (Date.now() - startedAt >= timeoutMs) throw error;
+      await sleep(250);
+    }
   }
-  return r?.result?.value;
 };
 
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
@@ -148,8 +221,7 @@ const ready = await call(`(async () => {
 })()`, 65000);
 console.error(`[bridge] 頁面就緒: ${ready}`);
 if (ready === 'timeout') {
-  console.error('[bridge] ChatGPT 頁面 60 秒內仍未就緒。若這是第一次使用，請確認專用 Chrome 視窗已登入 ChatGPT；否則可能只是網頁載入失敗，可重試。');
-  process.exit(1);
+  await failAfterReservation('[bridge] ChatGPT 頁面 60 秒內仍未就緒。若這是第一次使用，請確認專用 Chrome 視窗已登入 ChatGPT；否則可能只是網頁載入失敗，可重試。');
 }
 if (ready === 'composer-ready') {
   console.error('[bridge] 已在可用的新對話頁面');
@@ -164,7 +236,7 @@ const focused = await call(`(() => {
   el.scrollIntoView(); el.focus();
   return 'focused';
 })()`);
-if (focused !== 'focused') { console.error('[bridge] 找不到可見的 composer'); process.exit(1); }
+if (focused !== 'focused') await failAfterReservation('[bridge] 找不到可見的 composer');
 await cdp('Input.insertText', { text: prompt });
 const inj = await call(`(() => {
   const form = [...document.querySelectorAll('form[data-chatgpt-composer]')]
@@ -177,15 +249,25 @@ await wait(800);
 
 const baseline = await call(`document.querySelectorAll('[data-testid="generated-image-preview"] img, [data-testid="generated-image-gallery"] img').length`);
 
-const sent = await call(`(() => {
+const sent = await call(`(async () => {
+  const t0 = Date.now(), LIMIT = 15000;
+  while (Date.now() - t0 < LIMIT) {
+    const form = [...document.querySelectorAll('form[data-chatgpt-composer]')]
+      .find(f => !!(f.offsetWidth || f.offsetHeight || f.getClientRects().length));
+    const b = [...(form?.querySelectorAll('button') || [])]
+      .find(x=>/^(傳送|發送|Send)$/i.test((x.getAttribute('aria-label')||x.innerText||'').trim()));
+    if (b && !b.disabled) { b.click(); return 'clicked'; }
+    await new Promise(r => setTimeout(r, 250));
+  }
   const form = [...document.querySelectorAll('form[data-chatgpt-composer]')]
     .find(f => !!(f.offsetWidth || f.offsetHeight || f.getClientRects().length));
   const b = [...(form?.querySelectorAll('button') || [])]
     .find(x=>/^(傳送|發送|Send)$/i.test((x.getAttribute('aria-label')||x.innerText||'').trim()));
-  if(!b) return 'no-send-btn'; if(b.disabled) return 'send-disabled'; b.click(); return 'clicked';
-})()`);
+  if (!b) return 'no-send-btn';
+  return b.disabled ? 'send-disabled' : 'send-timeout';
+})()`, 20000);
 console.error(`[bridge] 發送: ${sent}`);
-if (sent !== 'clicked') { console.error('[bridge] 發送失敗'); process.exit(1); }
+if (sent !== 'clicked') await failAfterReservation(`[bridge] 發送失敗: ${sent}`);
 
 const done = await call(`(async () => {
   const t0 = Date.now(), LIMIT = ${TIMEOUT};
@@ -219,7 +301,8 @@ const done = await call(`(async () => {
 
 ws.close();
 const obj = JSON.parse(done);
-if (obj.error) { console.error(`[bridge] 失敗: ${obj.error}`); process.exit(1); }
+if (obj.error) await failAfterReservation(`[bridge] 失敗: ${obj.error}`);
 mkdirSync(join(OUT, '..'), { recursive: true });
 writeFileSync(OUT, Buffer.from(obj.data, 'base64'));
+await releaseTarget(reservation.target.id, reservation.temporary);
 console.log(OUT + ' ' + obj.bytes);
