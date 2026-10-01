@@ -12,7 +12,7 @@ const BRIDGE = join(dirname(fileURLToPath(import.meta.url)), 'chatgpt-image-brid
 
 const TOOLS = [{
   name: 'generate',
-  description: 'prompts 中每個元素各生成 1 張圖片；1 個元素生成 1 張，多個元素會並行生成。工具會等待所有圖片都完成後，依 prompts 原始順序一次回傳完整 images 陣列，不會逐張提前回傳。每個 prompt 應是可獨立理解的完整圖片描述，包含需要的主體、場景、構圖、文字與風格要求，不要依賴其他 prompt 的上下文。',
+  description: 'prompts 中每個元素各生成 1 張圖片；1 個元素生成 1 張，多個元素會在同一呼叫內串行生成（每個完成後隨機等待數秒再開始下一個，避免觸發限流）。工具會等待所有圖片都完成後，依 prompts 原始順序一次回傳完整 images 陣列，不會逐張提前回傳。每個 prompt 應是可獨立理解的完整圖片描述，包含需要的主體、場景、構圖、文字與風格要求，不要依賴其他 prompt 的上下文。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -74,7 +74,7 @@ function startBridge(args) {
 }
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-const randomLaunchDelay = () => 1500 + Math.floor(Math.random() * 1501);
+const interJobPause = () => 8000 + Math.floor(Math.random() * 17001);
 
 function readImageResult(out) {
   const [path] = out.split(' ');
@@ -131,11 +131,13 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
         if (outPath) bridgeArgs.push('--out', outPath);
 
         const job = startBridge(bridgeArgs);
-        jobs.push(job.completion);
 
         if (index < prompts.length - 1) {
-          await job.sent;
-          await sleep(randomLaunchDelay());
+          const done = await job.completion.catch(e => e);
+          jobs.push(done instanceof Error ? Promise.reject(done) : Promise.resolve(done));
+          await sleep(interJobPause());
+        } else {
+          jobs.push(job.completion);
         }
       }
 
